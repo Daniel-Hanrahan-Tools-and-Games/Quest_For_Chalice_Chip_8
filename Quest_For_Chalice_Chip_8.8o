@@ -1,0 +1,428 @@
+# -- title: Quest_For_Chalice_Compacted (CHIP-8 1977 Port)
+# -- author: Daniel Hanrahan Tools and Games
+# -- license: GPL-3.0
+# -- version: 3.8 (Mid-Air Steering Restored & Mixed 1-2 Barrels)
+# -- input: keyboard (A = Left, D = Right, S = Jump / Start)
+
+# =====================
+# COPYRIGHT & LICENSE
+# =====================
+# Copyright (C) 2025 Daniel Hanrahan Tools and Games
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# =====================
+# CONSTANTS & ALIASES
+# =====================
+:alias px v3        # player X position
+:alias py v4        # player Y position
+:alias vy v5        # player Y velocity (two's complement integer)
+:alias state v6     # game state: 0=title, 1=play, 2=gameover, 3=win
+:alias room v7      # current room (1-10)
+:alias on_ground v8 # 1 if on floor, 0 if in air
+:alias prev_room v9 # tracks the last room to avoid repeats
+
+# Scratch registers for loading memory / physics calculation
+:alias tmp_type v0  
+:alias tmp_x v1
+:alias tmp_y v2
+:alias stride vA
+
+# =====================
+# SPRITE DATA
+# =====================
+: spr_ground
+    0xFF
+
+# Custom Barrel Frame 1 (4 rows tall)
+: spr_barrel_1
+    0x28 0x50 0xA0 0x40
+
+# Custom Barrel Frame 2 (4 rows tall)
+: spr_barrel_2
+    0x54 0x68 0xB0 0x40
+
+: spr_chalice
+    0xFF 0xFF 0x7E 0x3C 0x18 0x18 0x3C 0x7E
+
+: spr_player_1
+    0x18 0x3C 0x18 0x1E 0x18 0x18 0x24 0x42
+
+: spr_player_2
+    0x18 0x3C 0x18 0x1E 0x18 0x18 0x18 0x18
+
+: spr_player_3
+    0x18 0x3C 0x18 0x1E 0x18 0x24 0x18 0x24
+
+# Hazard RAM Allocation (up to 2 hazards per room, 3 bytes each: Type, X, Y)
+: active_hazards
+    0 0 0  0 0 0
+
+# =====================
+# MAIN LOOP
+# =====================
+: main
+    state := 0
+    
+: main_loop
+    clear
+    
+    if state == 0 then jump do_title
+    if state == 1 then jump do_play
+    if state == 2 then jump do_gameover
+    if state == 3 then jump do_win
+    jump main_loop
+
+# =====================
+# TITLE SCREEN
+# =====================
+: do_title
+    i := spr_chalice
+    vB := 28
+    vC := 12
+    sprite vB vC 8
+    
+    # Press S (Key 8) to start instantly
+    v0 := 8
+    if v0 key then jump pick_random_room
+    jump main_loop
+
+# =====================
+# GAMEPLAY LOOP
+# =====================
+: do_play
+    # 1. Update positions
+    jump update_player
+: post_update_player
+
+    jump update_hazards
+: post_update_hazards
+    
+    # 2. Render sequence & collisions
+    jump draw_player
+: post_draw_player
+
+    if room != 4 then jump skip_goal_draw
+    jump draw_goal
+: skip_goal_draw
+: post_goal_return
+
+    jump draw_hazards
+: post_draw_hazards
+
+    jump draw_floor
+    
+: pick_random_room
+    room := random 9
+    room += 1
+    if room == prev_room then jump pick_random_room
+    prev_room := room
+    jump load_room
+
+# =====================
+# UPDATE PLAYER (Mid-Air Steering Enabled)
+# =====================
+: update_player
+    # Controls: A = Left (Key 7), D = Right (Key 9)
+    v0 := 7
+    if v0 key begin
+        if px > 1 begin
+            px += 254   # Left (-2)
+        end
+    end
+    
+    v0 := 9
+    if v0 key begin
+        if px < 55 begin
+            px += 2     # Right (+2)
+        end
+    end
+    
+    # Jump Logic: S = Jump (Key 8)
+    if on_ground == 0 then jump apply_gravity
+    v0 := 8
+    if v0 key begin
+        vy := 242       # Massive jump (-14 in two's complement)
+        on_ground := 0
+    end
+    
+: apply_gravity
+    py += vy
+    vy += 1
+    if vy > 2 begin
+        vy := 2         # Low terminal velocity cap for a slow, floaty fall
+    end
+    
+    # Ceiling Check (Stops player from wrapping around the top of the 32px screen)
+    if py > 31 begin
+        py := 0
+        vy := 0
+    end
+    
+    # Floor Check (Floor at Y = 24, Player 8px tall)
+    if py < 24 then jump end_update_player
+    py := 24
+    vy := 0
+    on_ground := 1
+    
+: end_update_player
+    jump post_update_player
+
+# =====================
+# UPDATE HAZARDS (Max 2 Barrels)
+# =====================
+: update_hazards
+    vD := 0
+: hazard_update_loop
+    if vD == 2 then jump post_update_hazards
+    
+    calc_hazard_ptr
+    load v2
+    
+    if tmp_type == 0 then jump hazard_update_next
+    if tmp_type == 2 then jump update_barrel
+
+: hazard_update_next
+    vD += 1
+    jump hazard_update_loop
+    
+: update_barrel
+    tmp_x += 255
+    if tmp_x < 128 then jump save_hazard
+    tmp_x := 63
+    
+: save_hazard
+    calc_hazard_ptr
+    save v2
+    jump hazard_update_next
+
+: calc_hazard_ptr
+    i := active_hazards
+    vE := vD
+: calc_ptr_loop
+    if vE == 0 then return
+    stride := 3
+    i += stride
+    vE += 255
+    jump calc_ptr_loop
+
+# =====================
+# DRAW FUNCTIONS
+# =====================
+: draw_player
+    i := spr_player_1
+    sprite px py 8
+    jump post_draw_player
+
+: draw_goal
+    vB := 54
+    vC := 24
+    i := spr_chalice
+    sprite vB vC 8
+    
+    if vF == 0 then jump post_draw_goal
+    state := 3 # WIN
+: post_draw_goal
+    jump post_goal_return
+
+: draw_hazards
+    vD := 0
+: hazard_draw_loop
+    if vD == 2 then jump post_draw_hazards
+    
+    calc_hazard_ptr
+    load v2
+    
+    if tmp_type == 0 then jump hazard_draw_next
+    if tmp_type == 2 then jump draw_barrel_frame
+    jump hazard_draw_next
+
+: draw_barrel_frame
+    # Alternate between frame 1 and 2 based on X position using a register mask
+    vB := tmp_x
+    vC := 4
+    vB &= vC
+    if vB == 0 then i := spr_barrel_1
+    if vB != 0 then i := spr_barrel_2
+    
+    # Render with height 4 to match custom sprite size
+    sprite tmp_x tmp_y 4
+    
+    if vF == 0 then jump hazard_draw_next
+    state := 2 # GAME OVER
+
+: hazard_draw_next
+    vD += 1
+    jump hazard_draw_loop
+
+: draw_floor
+    vB := 0
+    vC := 31
+: floor_loop
+    if vB > 63 then jump floor_done
+    i := spr_ground 
+    sprite vB vC 1
+    vB += 8
+    jump floor_loop
+: floor_done
+    # Check Room Transition (Right edge walk-off) after drawing floor
+    if px > 55 then jump pick_random_room
+    jump main_loop
+
+# =====================
+# GAME OVER & WIN
+# =====================
+: do_gameover
+    vB := 28
+    vC := 12
+    i := spr_barrel_1
+    sprite vB vC 4
+    
+    v0 := 8 # Press S to restart
+    if v0 key then jump restart_game
+    jump main_loop
+
+: do_win
+    vB := 28
+    vC := 12
+    i := spr_chalice
+    sprite vB vC 8
+    
+    v0 := 8 # Press S to restart
+    if v0 key then jump restart_game
+    jump main_loop
+
+: restart_game
+    state := 1
+    jump pick_random_room
+
+# =====================
+# LOAD ROOM
+# =====================
+: load_room
+    px := 2
+    py := 24
+    vy := 0
+    on_ground := 1
+    state := 1
+    
+    vD := 0
+: clear_hazards_loop
+    if vD == 2 then jump setup_room_data
+    calc_hazard_ptr
+    tmp_type := 0
+    save v2
+    vD += 1
+    jump clear_hazards_loop
+    
+: setup_room_data
+    if room == 1 then jump load_r1
+    if room == 2 then jump load_r2
+    if room == 3 then jump load_r3
+    if room == 4 then jump load_r4
+    if room == 5 then jump load_r5
+    if room == 6 then jump load_r6
+    if room == 7 then jump load_r7
+    if room == 8 then jump load_r8
+    if room == 9 then jump load_r9
+    if room == 10 then jump load_r10
+    jump main_loop
+
+# Hazard helper writes (Max 2 slots)
+: write_h0
+    vD := 0
+    calc_hazard_ptr
+    save v2
+    return
+
+: write_h1
+    vD := 1
+    calc_hazard_ptr
+    save v2
+    return
+
+# Mix of 1-barrel and 2-barrel rooms
+: load_r1
+    tmp_type := 2
+    tmp_x := 30
+    tmp_y := 28
+    write_h0
+    jump main_loop # Room 1: 1 barrel
+    
+: load_r2
+    tmp_type := 2
+    tmp_x := 14
+    tmp_y := 28
+    write_h0
+    tmp_type := 2
+    tmp_x := 48
+    tmp_y := 28
+    write_h1
+    jump main_loop # Room 2: 2 barrels
+    
+: load_r3
+    tmp_type := 2
+    tmp_x := 40
+    tmp_y := 28
+    write_h0
+    jump main_loop # Room 3: 1 barrel
+    
+: load_r4
+    jump main_loop # Room 4: Goal room (0 hazards)
+    
+: load_r5
+    tmp_type := 2
+    tmp_x := 15
+    tmp_y := 28
+    write_h0
+    tmp_type := 2
+    tmp_x := 45
+    tmp_y := 28
+    write_h1
+    jump main_loop # Room 5: 2 barrels
+    
+: load_r6
+    tmp_type := 2
+    tmp_x := 22
+    tmp_y := 28
+    write_h0
+    jump main_loop # Room 6: 1 barrel
+    
+: load_r7
+    tmp_type := 2
+    tmp_x := 20
+    tmp_y := 28
+    write_h0
+    tmp_type := 2
+    tmp_x := 52
+    tmp_y := 28
+    write_h1
+    jump main_loop # Room 7: 2 barrels
+    
+: load_r8
+    tmp_type := 2
+    tmp_x := 35
+    tmp_y := 28
+    write_h0
+    jump main_loop # Room 8: 1 barrel
+    
+: load_r9
+    tmp_type := 2
+    tmp_x := 24
+    tmp_y := 28
+    write_h0
+    tmp_type := 2
+    tmp_x := 58
+    tmp_y := 28
+    write_h1
+    jump main_loop # Room 9: 2 barrels
+    
+: load_r10
+    tmp_type := 2
+    tmp_x := 22
+    tmp_y := 28
+    write_h0
+    tmp_type := 2
+    tmp_x := 52
+    tmp_y := 28
+    write_h1
+    jump main_loop # Room 10: 2 barrels
